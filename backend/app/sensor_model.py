@@ -140,6 +140,58 @@ def estimate_local_curvature(
     return np.clip(R_est, 0.005, 0.1)  # bound between 5mm and 10cm
 
 
+def _detect_flat_contact(contact_points: list[ContactPoint], z_threshold: float = 1e-4) -> bool:
+    """
+    Detect if contact points represent a flat face pressing into the membrane.
+    Flat contacts have many points with nearly identical z-coordinates.
+    """
+    if len(contact_points) < 4:
+        return False
+    positions = np.array([cp.position for cp in contact_points])
+    z_range = np.ptp(positions[:, 2])
+    xy_spread = np.max(np.ptp(positions[:, :2], axis=0))
+    # Flat if z-variation is tiny relative to xy spread
+    return z_range < z_threshold and xy_spread > 0.001
+
+
+def _uniform_pressure_map(
+    contact_points: list[ContactPoint],
+    total_force: float,
+    xx: np.ndarray,
+    yy: np.ndarray,
+    taxel_size: float,
+) -> np.ndarray:
+    """
+    Generate uniform pressure distribution for flat-face contact.
+    p = F / A across the rectangular contact region.
+    """
+    positions = np.array([cp.position for cp in contact_points])
+    x_min, x_max = positions[:, 0].min(), positions[:, 0].max()
+    y_min, y_max = positions[:, 1].min(), positions[:, 1].max()
+
+    # Add half-spacing to cover the full contact face (not just point centers)
+    if len(contact_points) > 1:
+        # Estimate spacing from the grid
+        x_sorted = np.sort(np.unique(np.round(positions[:, 0], 8)))
+        y_sorted = np.sort(np.unique(np.round(positions[:, 1], 8)))
+        dx = np.min(np.diff(x_sorted)) / 2 if len(x_sorted) > 1 else taxel_size
+        dy = np.min(np.diff(y_sorted)) / 2 if len(y_sorted) > 1 else taxel_size
+        x_min -= dx
+        x_max += dx
+        y_min -= dy
+        y_max += dy
+
+    # Create rectangular mask
+    mask = (xx >= x_min) & (xx <= x_max) & (yy >= y_min) & (yy <= y_max)
+    contact_area = float(np.sum(mask)) * taxel_size ** 2
+
+    if contact_area < 1e-12:
+        return np.zeros_like(xx)
+
+    uniform_pressure = total_force / contact_area
+    return np.where(mask, uniform_pressure, 0.0).astype(np.float64)
+
+
 def generate_pressure_map(
     sim_result: SimulationResult,
     sensor_type: SensorType,
@@ -178,33 +230,38 @@ def generate_pressure_map(
             metadata={"num_contacts": 0, "warning": "No contact detected"},
         )
 
-    # Estimate local curvature from contact geometry
-    R_eff = estimate_local_curvature(contact_points)
-
-    # Distribute total force: if PyBullet gives few contact points,
-    # we redistribute the total force proportionally
     total_sim_force = sum(cp.normal_force for cp in contact_points)
 
-    for cp in contact_points:
-        # Map contact position to sensor grid coordinates
-        cx, cy = cp.position[0], cp.position[1]
+    # Detect flat-face vs curved contact
+    # Flat face: many points spread uniformly with similar z-coordinates
+    is_flat_contact = _detect_flat_contact(contact_points)
 
-        # Radial distance from this contact point to every taxel
-        r_grid = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-
-        # Compute Hertzian pressure contribution from this contact
-        force_at_contact = cp.normal_force
-        if force_at_contact < 1e-6:
-            continue
-
-        pressure_contribution = hertzian_pressure_at_point(
-            force=force_at_contact,
-            radius_of_curvature=R_eff,
-            E_star=E_star,
-            r=r_grid,
+    if is_flat_contact:
+        # Uniform pressure model for flat-on-flat contact: p = F / A
+        # Build a mask from the convex hull of contact points
+        pressure_map = _uniform_pressure_map(
+            contact_points, total_sim_force, xx, yy, taxel_size
         )
+    else:
+        # Hertzian contact model for curved surfaces
+        R_eff = estimate_local_curvature(contact_points)
 
-        pressure_map += pressure_contribution
+        for cp in contact_points:
+            cx, cy = cp.position[0], cp.position[1]
+            r_grid = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+
+            force_at_contact = cp.normal_force
+            if force_at_contact < 1e-6:
+                continue
+
+            pressure_contribution = hertzian_pressure_at_point(
+                force=force_at_contact,
+                radius_of_curvature=R_eff,
+                E_star=E_star,
+                r=r_grid,
+            )
+
+            pressure_map += pressure_contribution
 
     # Apply spatial blur to simulate gel deformation spreading
     pressure_map = gaussian_filter(pressure_map, sigma=specs["spatial_blur_sigma"])
@@ -222,7 +279,8 @@ def generate_pressure_map(
     metadata = {
         "num_contacts": len(contact_points),
         "total_sim_force_N": total_sim_force,
-        "effective_curvature_radius_m": R_eff,
+        "contact_model": "uniform" if is_flat_contact else "hertzian",
+        "effective_curvature_radius_m": None if is_flat_contact else R_eff,
         "E_star_Pa": E_star,
         "taxel_size_m": taxel_size,
         "sensor_area_m": area_size,
