@@ -2,8 +2,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
-dist/
-build/
 .eggs/
 *.egg
 .venv/
@@ -15,3 +13,8 @@ backend/output/
 .DS_Store
 *.swp
 *.swo
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/

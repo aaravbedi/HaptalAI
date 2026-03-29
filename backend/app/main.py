@@ -2,11 +2,13 @@
 HaptalAI Backend — FastAPI application for synthetic tactile data generation.
 
 Endpoints:
-    POST /generate  — Upload mesh + params, get back heatmap PNG + .npy array
-    GET  /health    — Health check
+    POST /generate   — Upload mesh + params, get back heatmap PNG + .npy ZIP
+    POST /simulate   — Upload mesh, get back contact point JSON for live preview
+    GET  /health     — Health check
 """
 
 import io
+import json
 import os
 import tempfile
 import zipfile
@@ -14,16 +16,25 @@ from typing import Annotated
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
 from .heatmap import generate_heatmap_png
-from .sensor_model import SensorType, generate_pressure_map
+from .sensor_model import SensorType, generate_pressure_map, SENSOR_SPECS
 from .simulation import ContactScenario, run_contact_simulation
+from . import sensor_model
 
 app = FastAPI(
     title="HaptalAI",
     description="Synthetic tactile data generation for robotics",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 ALLOWED_EXTENSIONS = {".obj", ".stl"}
@@ -133,5 +144,83 @@ async def generate_tactile_data(
     except Exception as e:
         raise HTTPException(500, f"Simulation failed: {str(e)}")
 
+    finally:
+        os.unlink(tmp_path)
+
+
+@app.post("/simulate")
+async def simulate_contact(
+    mesh_file: Annotated[UploadFile, File(description="3D mesh file (.obj or .stl)")],
+    sensor_type: Annotated[str, Form()] = "gelsight",
+    scenario: Annotated[str, Form()] = "poke",
+    mesh_scale: Annotated[float, Form()] = 0.001,
+):
+    """
+    Run PyBullet simulation and return contact point data as JSON.
+    The frontend uses this to compute live Hertzian pressure maps client-side.
+    """
+    filename = mesh_file.filename or "mesh.obj"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported file type '{ext}'. Use .obj or .stl")
+
+    try:
+        sensor = SensorType(sensor_type.lower())
+    except ValueError:
+        raise HTTPException(400, f"Unknown sensor type '{sensor_type}'")
+
+    try:
+        contact_scenario = ContactScenario(scenario.lower())
+    except ValueError:
+        raise HTTPException(400, f"Unknown scenario '{scenario}'")
+
+    content = await mesh_file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, "File too large")
+
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        sim_result = run_contact_simulation(
+            mesh_path=tmp_path,
+            scenario=contact_scenario,
+            mesh_scale=mesh_scale,
+        )
+
+        specs = SENSOR_SPECS[sensor]
+        E_star = sensor_model.compute_effective_modulus(
+            specs["gel_young_modulus"], specs["gel_poisson_ratio"])
+        R_eff = sensor_model.estimate_local_curvature(
+            sim_result.contact_points)
+
+        contacts = []
+        for cp in sim_result.contact_points:
+            contacts.append({
+                "position": cp.position.tolist(),
+                "normal": cp.normal.tolist(),
+                "normal_force": cp.normal_force,
+            })
+
+        return {
+            "contacts": contacts,
+            "curvature_radius": R_eff,
+            "penetration_depth": sim_result.penetration_depth,
+            "sensor_specs": {
+                "resolution": specs["resolution"],
+                "sensing_area": specs["sensing_area"],
+                "gel_young_modulus": specs["gel_young_modulus"],
+                "gel_poisson_ratio": specs["gel_poisson_ratio"],
+                "noise_std": specs["noise_std"],
+                "spatial_blur_sigma": specs["spatial_blur_sigma"],
+            },
+            "E_star": E_star,
+            "total_sim_force": sum(cp.normal_force for cp in sim_result.contact_points),
+            "mesh_file": filename,
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"Simulation failed: {str(e)}")
     finally:
         os.unlink(tmp_path)
