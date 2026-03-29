@@ -1,8 +1,9 @@
-import { Suspense, useState, useEffect, useMemo } from 'react';
+import { Suspense, useState, useEffect } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Center } from '@react-three/drei';
+import { OrbitControls, Center, Bounds } from '@react-three/drei';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import * as THREE from 'three';
 
 function AsyncMesh({ url, fileType }) {
   const [mesh, setMesh] = useState(null);
@@ -13,16 +14,19 @@ function AsyncMesh({ url, fileType }) {
       const loader = new STLLoader();
       loader.load(url, (geometry) => {
         geometry.computeVertexNormals();
+        geometry.center();
         setMesh({ type: 'buffer', geometry });
       });
     } else {
       const loader = new OBJLoader();
       loader.load(url, (obj) => {
-        // Apply material to all children
         obj.traverse((child) => {
           if (child.isMesh) {
-            child.material.color.set('#f59e0b');
-            child.material.roughness = 0.6;
+            child.material = new THREE.MeshStandardMaterial({
+              color: '#f59e0b',
+              roughness: 0.6,
+              metalness: 0.1,
+            });
           }
         });
         setMesh({ type: 'group', object: obj });
@@ -58,7 +62,7 @@ export default function MeshViewer({ file }) {
   return (
     <div className="w-full h-full bg-zinc-950 rounded border border-zinc-800 min-h-[250px]">
       <Canvas
-        camera={{ position: [0.03, 0.03, 0.03], fov: 50, near: 0.001, far: 10 }}
+        camera={{ position: [3, 3, 3], fov: 50, near: 0.001, far: 10000 }}
         gl={{ antialias: true }}
       >
         <color attach="background" args={['#09090b']} />
@@ -68,9 +72,11 @@ export default function MeshViewer({ file }) {
 
         {meshUrl ? (
           <Suspense fallback={null}>
-            <Center>
-              <AsyncMesh url={meshUrl} fileType={fileType} />
-            </Center>
+            <Bounds fit clip observe margin={1.5}>
+              <Center>
+                <AsyncMesh url={meshUrl} fileType={fileType} />
+              </Center>
+            </Bounds>
           </Suspense>
         ) : (
           <mesh>
@@ -79,8 +85,7 @@ export default function MeshViewer({ file }) {
           </mesh>
         )}
 
-        <gridHelper args={[0.1, 20, '#27272a', '#1a1a1e']} />
-        <OrbitControls enableDamping dampingFactor={0.1} />
+        <OrbitControls enableDamping dampingFactor={0.1} makeDefault />
       </Canvas>
     </div>
   );
