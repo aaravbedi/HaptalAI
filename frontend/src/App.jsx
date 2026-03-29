@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import MeshUploader from './components/MeshUploader';
 import MeshViewer from './components/MeshViewer';
 import ControlSliders from './components/ControlSliders';
@@ -7,6 +7,7 @@ import StatsReadout from './components/StatsReadout';
 import ColorBar from './components/ColorBar';
 import { computePressureMap } from './lib/hertzian';
 import { encodeNpy, downloadBlob } from './lib/npy';
+import { DEMO_SIM_DATA } from './lib/demo-data';
 
 const API_BASE = '/api';
 
@@ -15,9 +16,21 @@ export default function App() {
   const [simData, setSimData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [demoMode, setDemoMode] = useState(false);
 
   const [force, setForce] = useState(2.0);
   const [sensorType, setSensorType] = useState('gelsight');
+
+  // Load demo data on mount — try backend first, fall back to demo
+  useEffect(() => {
+    fetch(`${API_BASE}/health`).then(r => {
+      if (!r.ok) throw new Error();
+    }).catch(() => {
+      setDemoMode(true);
+      setSimData(DEMO_SIM_DATA);
+      setForce(1.0);
+    });
+  }, []);
   const [scenario, setScenario] = useState('poke');
 
   // Run simulation when mesh is uploaded
@@ -125,8 +138,15 @@ export default function App() {
             v0.1.0
           </span>
         </div>
-        <div className="text-[10px] text-zinc-600">
-          synthetic tactile data generation
+        <div className="flex items-center gap-3">
+          {demoMode && (
+            <span className="text-[10px] text-cyan-400 border border-cyan-400/30 bg-cyan-400/5 px-1.5 py-0.5 rounded">
+              DEMO — 10mm sphere
+            </span>
+          )}
+          <span className="text-[10px] text-zinc-600">
+            synthetic tactile data generation
+          </span>
         </div>
       </header>
 
