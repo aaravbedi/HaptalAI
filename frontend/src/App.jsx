@@ -14,14 +14,16 @@ const API_BASE = '/api';
 export default function App() {
   const [meshFile, setMeshFile] = useState(null);
   const [simData, setSimData] = useState(null);
+  const [serverHeatmap, setServerHeatmap] = useState(null); // base64 PNG from backend
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [demoMode, setDemoMode] = useState(false);
 
   const [force, setForce] = useState(2.0);
   const [sensorType, setSensorType] = useState('gelsight');
+  const [scenario, setScenario] = useState('poke');
 
-  // Load demo data on mount — try backend first, fall back to demo
+  // On mount: check if backend is available, fall back to demo
   useEffect(() => {
     fetch(`${API_BASE}/health`).then(r => {
       if (!r.ok) throw new Error();
@@ -31,14 +33,11 @@ export default function App() {
       setForce(1.0);
     });
   }, []);
-  const [scenario, setScenario] = useState('poke');
 
-  // Run simulation when mesh is uploaded
-  const handleFileSelected = useCallback(async (file) => {
-    setMeshFile(file);
+  // Upload mesh → POST to backend → get heatmap + stats + contact data
+  const runSimulation = useCallback(async (file, sensor, scen) => {
     setError(null);
 
-    // In demo mode (no backend), just show the 3D preview with demo data
     if (demoMode) {
       setSimData(DEMO_SIM_DATA);
       return;
@@ -48,8 +47,8 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append('mesh_file', file);
-      formData.append('sensor_type', sensorType);
-      formData.append('scenario', scenario);
+      formData.append('sensor_type', sensor);
+      formData.append('scenario', scen);
       formData.append('mesh_scale', '0.001');
 
       const res = await fetch(`${API_BASE}/simulate`, {
@@ -59,66 +58,53 @@ export default function App() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Simulation failed (${res.status})`);
+        throw new Error(errData.detail || `Server error (${res.status})`);
       }
 
       const data = await res.json();
       setSimData(data);
+      setServerHeatmap(data.heatmap_png_b64 || null);
       setForce(Math.round(data.total_sim_force * 10) / 10 || 2.0);
     } catch (err) {
       setError(err.message);
-      // Don't clear simData — keep demo/previous data usable
     } finally {
       setLoading(false);
     }
-  }, [sensorType, scenario, demoMode]);
+  }, [demoMode]);
 
-  // Re-run simulation when sensor/scenario changes (if mesh exists)
+  const handleFileSelected = useCallback((file) => {
+    setMeshFile(file);
+    runSimulation(file, sensorType, scenario);
+  }, [sensorType, scenario, runSimulation]);
+
   const handleSensorChange = useCallback((s) => {
     setSensorType(s);
-    if (meshFile && !demoMode) {
-      const rerun = async () => {
-        setLoading(true);
-        try {
-          const formData = new FormData();
-          formData.append('mesh_file', meshFile);
-          formData.append('sensor_type', s);
-          formData.append('scenario', scenario);
-          formData.append('mesh_scale', '0.001');
-          const res = await fetch(`${API_BASE}/simulate`, { method: 'POST', body: formData });
-          if (res.ok) setSimData(await res.json());
-        } catch (e) { /* keep existing data */ }
-        finally { setLoading(false); }
-      };
-      rerun();
-    }
-  }, [meshFile, scenario, demoMode]);
+    if (meshFile) runSimulation(meshFile, s, scenario);
+  }, [meshFile, scenario, runSimulation]);
 
   const handleScenarioChange = useCallback((s) => {
     setScenario(s);
-    if (meshFile && !demoMode) {
-      const rerun = async () => {
-        setLoading(true);
-        try {
-          const formData = new FormData();
-          formData.append('mesh_file', meshFile);
-          formData.append('sensor_type', sensorType);
-          formData.append('scenario', s);
-          formData.append('mesh_scale', '0.001');
-          const res = await fetch(`${API_BASE}/simulate`, { method: 'POST', body: formData });
-          if (res.ok) setSimData(await res.json());
-        } catch (e) { /* keep existing data */ }
-        finally { setLoading(false); }
-      };
-      rerun();
-    }
-  }, [meshFile, sensorType]);
+    if (meshFile) runSimulation(meshFile, sensorType, s);
+  }, [meshFile, sensorType, runSimulation]);
 
-  // Compute pressure map client-side (instant, no network)
+  // Client-side pressure map for live slider updates
   const pressureResult = useMemo(() => {
     if (!simData) return { map: null, maxPressure: 0, contactArea: 0, integratedForce: 0 };
     return computePressureMap(simData, force, sensorType);
   }, [simData, force, sensorType]);
+
+  // Use server stats when force matches sim force (initial load),
+  // otherwise use client-computed stats from slider
+  const displayStats = useMemo(() => {
+    if (simData?.peak_pressure_Pa && Math.abs(force - (simData.total_sim_force || 0)) < 0.05) {
+      return {
+        maxPressure: simData.peak_pressure_Pa,
+        contactArea: simData.contact_area_mm2,
+        integratedForce: simData.integrated_force_N,
+      };
+    }
+    return pressureResult;
+  }, [simData, force, pressureResult]);
 
   // Download .npy
   const handleDownload = useCallback(() => {
@@ -158,7 +144,6 @@ export default function App() {
       <div className="flex-1 flex min-h-0">
         {/* ─── Left panel ─── */}
         <div className="w-1/2 flex flex-col border-r border-zinc-800 p-4 gap-4 overflow-y-auto">
-          {/* Mesh upload */}
           <section>
             <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
               mesh input
@@ -166,7 +151,6 @@ export default function App() {
             <MeshUploader onFileSelected={handleFileSelected} disabled={loading} />
           </section>
 
-          {/* 3D preview */}
           <section className="flex-1 min-h-[200px]">
             <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
               3d preview
@@ -176,7 +160,6 @@ export default function App() {
             </div>
           </section>
 
-          {/* Controls */}
           <section>
             <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
               parameters
@@ -195,7 +178,6 @@ export default function App() {
 
         {/* ─── Right panel ─── */}
         <div className="w-1/2 flex flex-col p-4 gap-4 overflow-y-auto">
-          {/* Status */}
           {loading && (
             <div className="text-xs text-amber-400 bg-amber-400/5 border border-amber-400/20 rounded px-3 py-2">
               running PyBullet simulation...
@@ -207,20 +189,28 @@ export default function App() {
             </div>
           )}
 
-          {/* Heatmap */}
+          {/* Heatmap — show server PNG if available, else client-rendered */}
           <section className="flex-1 flex flex-col min-h-0">
             <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
               pressure distribution
             </div>
             <div className="flex gap-3 flex-1 min-h-0 items-start">
               <div className="flex-1">
-                <PressureHeatmap
-                  pressureMap={pressureResult.map}
-                  maxPressure={pressureResult.maxPressure}
-                />
+                {serverHeatmap && Math.abs(force - (simData?.total_sim_force || 0)) < 0.05 ? (
+                  <img
+                    src={`data:image/png;base64,${serverHeatmap}`}
+                    alt="Pressure heatmap"
+                    className="w-full rounded border border-zinc-800 bg-zinc-950"
+                  />
+                ) : (
+                  <PressureHeatmap
+                    pressureMap={pressureResult.map}
+                    maxPressure={pressureResult.maxPressure}
+                  />
+                )}
               </div>
               <div className="h-[384px] py-1">
-                <ColorBar maxValue={pressureResult.maxPressure} />
+                <ColorBar maxValue={displayStats.maxPressure} />
               </div>
             </div>
           </section>
@@ -230,7 +220,7 @@ export default function App() {
             <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
               measurements
             </div>
-            <StatsReadout stats={pressureResult} />
+            <StatsReadout stats={displayStats} />
           </section>
 
           {/* Download */}
@@ -261,6 +251,14 @@ export default function App() {
                 <div>curvature R: <span className="text-zinc-300">{(simData.curvature_radius * 1e3).toFixed(2)} mm</span></div>
                 <div>E*: <span className="text-zinc-300">{(simData.E_star / 1e6).toFixed(3)} MPa</span></div>
                 <div>penetration: <span className="text-zinc-300">{(simData.penetration_depth * 1e3).toFixed(3)} mm</span></div>
+                {simData.peak_pressure_Pa != null && (
+                  <>
+                    <div className="border-t border-zinc-800 my-1 pt-1 text-zinc-600">server-computed:</div>
+                    <div>peak pressure: <span className="text-zinc-300">{(simData.peak_pressure_Pa / 1e3).toFixed(2)} kPa</span></div>
+                    <div>contact area: <span className="text-zinc-300">{simData.contact_area_mm2?.toFixed(2)} mm²</span></div>
+                    <div>integrated force: <span className="text-zinc-300">{simData.integrated_force_N?.toFixed(4)} N</span></div>
+                  </>
+                )}
               </div>
             </section>
           )}

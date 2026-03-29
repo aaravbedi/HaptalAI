@@ -195,6 +195,18 @@ async def simulate_contact(
         R_eff = sensor_model.estimate_local_curvature(
             sim_result.contact_points)
 
+        # Compute pressure map and stats server-side
+        tactile = generate_pressure_map(sim_result, sensor)
+
+        # Generate heatmap PNG as base64
+        import base64
+        heatmap_bytes = generate_heatmap_png(
+            tactile.pressure_map,
+            sensor_area_m=tactile.metadata.get("sensor_area_m", 0.02),
+            title=f"{sensor.value.upper()} / {contact_scenario.value}",
+        )
+        heatmap_b64 = base64.b64encode(heatmap_bytes).decode("ascii")
+
         contacts = []
         for cp in sim_result.contact_points:
             contacts.append({
@@ -218,6 +230,11 @@ async def simulate_contact(
             "E_star": E_star,
             "total_sim_force": sum(cp.normal_force for cp in sim_result.contact_points),
             "mesh_file": filename,
+            # Server-computed results
+            "peak_pressure_Pa": tactile.max_pressure,
+            "contact_area_mm2": tactile.contact_area * 1e6,
+            "integrated_force_N": tactile.total_force,
+            "heatmap_png_b64": heatmap_b64,
         }
 
     except Exception as e:
