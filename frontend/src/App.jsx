@@ -90,8 +90,8 @@ export default function App() {
   // Client-side pressure map for live slider updates
   const pressureResult = useMemo(() => {
     if (!simData) return { map: null, maxPressure: 0, contactArea: 0, integratedForce: 0 };
-    return computePressureMap(simData, force, sensorType);
-  }, [simData, force, sensorType]);
+    return computePressureMap(simData, force, sensorType, scenario);
+  }, [simData, force, sensorType, scenario]);
 
   // Use server stats when force matches sim force (initial load),
   // otherwise use client-computed stats from slider

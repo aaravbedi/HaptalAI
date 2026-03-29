@@ -62,17 +62,18 @@ export default function MeshViewer({ file }) {
   return (
     <div className="w-full h-full bg-zinc-950 rounded border border-zinc-800 min-h-[250px]">
       <Canvas
-        camera={{ position: [3, 3, 3], fov: 50, near: 0.001, far: 10000 }}
+        camera={{ position: [3, 3, 3], fov: 50, near: 0.0001, far: 100000 }}
         gl={{ antialias: true }}
       >
         <color attach="background" args={['#09090b']} />
-        <ambientLight intensity={0.4} />
-        <directionalLight position={[5, 5, 5]} intensity={0.8} />
-        <directionalLight position={[-3, -3, 2]} intensity={0.3} />
+        <ambientLight intensity={0.5} />
+        <directionalLight position={[10, 10, 10]} intensity={0.8} />
+        <directionalLight position={[-10, -10, 5]} intensity={0.4} />
+        <directionalLight position={[0, -10, -10]} intensity={0.2} />
 
         {meshUrl ? (
           <Suspense fallback={null}>
-            <Bounds fit clip observe margin={1.5}>
+            <Bounds fit clip observe margin={1.8}>
               <Center>
                 <AsyncMesh url={meshUrl} fileType={fileType} />
               </Center>

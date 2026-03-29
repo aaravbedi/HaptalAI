@@ -1,7 +1,33 @@
 /**
  * Client-side Hertzian contact pressure computation.
  * Mirrors backend/app/sensor_model.py for live preview.
+ *
+ * Produces meaningfully different pressure maps depending on:
+ *   - Sensor type: GelSight (softer gel, larger area) vs DIGIT (firmer, smaller)
+ *   - Scenario:    grasp (symmetric) / poke (concentrated) / slide (asymmetric)
  */
+
+/* ── Sensor-specific physical parameters ──────────────────────────── */
+const SENSOR_PARAMS = {
+  gelsight: {
+    resolution: 64,
+    sensing_area: 0.02,        // 20 mm
+    E_gel: 0.5e6,              // 0.5 MPa
+    poisson: 0.48,
+    noise_std: 5.0,            // Pa
+    blurPasses: 3,             // more blur → smoother gradient
+    asymmetryScale: 0,         // perfectly symmetric sensor
+  },
+  digit: {
+    resolution: 64,            // native 32x32 upsampled
+    sensing_area: 0.015,       // 15 mm
+    E_gel: 0.3e6,              // 0.3 MPa (softer gel)
+    poisson: 0.48,
+    noise_std: 8.0,
+    blurPasses: 1,             // fewer blur → sharper edges
+    asymmetryScale: 0.06,      // slight intrinsic asymmetry (oval-ish pad)
+  },
+};
 
 /**
  * Compute effective Young's modulus for gel-rigid contact.
@@ -41,16 +67,18 @@ function isFlatContact(contacts) {
 /**
  * Compute a 64x64 pressure map from contact data + user-controlled force.
  *
- * @param {Object} simData - From /simulate endpoint
- * @param {number} forceN - User-selected force (N)
- * @param {string} sensorType - 'gelsight' or 'digit'
+ * @param {Object}  simData    - From /simulate endpoint (or DEMO_SIM_DATA)
+ * @param {number}  forceN     - User-selected force (N)
+ * @param {string}  sensorType - 'gelsight' | 'digit'
+ * @param {string}  scenario   - 'grasp' | 'poke' | 'slide'
  * @returns {{ map: Float64Array, maxPressure: number, contactArea: number, integratedForce: number }}
  */
-export function computePressureMap(simData, forceN, sensorType = 'gelsight') {
-  const specs = simData.sensor_specs;
-  const res = specs.resolution;          // 64
-  const area = specs.sensing_area;       // meters
-  const E_star = simData.E_star;
+export function computePressureMap(simData, forceN, sensorType = 'gelsight', scenario = 'grasp') {
+  /* ── Sensor-aware parameters ─────────────────────────────────── */
+  const sp = SENSOR_PARAMS[sensorType] || SENSOR_PARAMS.gelsight;
+  const res = sp.resolution;
+  const area = sp.sensing_area;
+  const E_star = effectiveModulus(sp.E_gel, sp.poisson);
   const R = simData.curvature_radius;
 
   const taxelSize = area / res;
@@ -66,6 +94,28 @@ export function computePressureMap(simData, forceN, sensorType = 'gelsight') {
   if (!contacts || contacts.length === 0) {
     return { map, maxPressure: 0, contactArea: 0, integratedForce: 0 };
   }
+
+  /* ── Scenario modifiers ──────────────────────────────────────── */
+  // contactRadiusFactor: multiplied into effective curvature radius
+  //   smaller → smaller contact patch → higher peak pressure
+  // shearShiftX: post-hoc asymmetric shift in +x (meters) for slide
+  // shearPressureBias: linear ramp multiplied across x for slide
+  let contactRadiusFactor = 1.0;
+  let shearShiftX = 0.0;
+  let shearPressureBias = 0.0;
+
+  if (scenario === 'poke') {
+    // Point contact: use 0.3x effective radius → much smaller a, higher p0
+    contactRadiusFactor = 0.3;
+  } else if (scenario === 'slide') {
+    // Sliding: moderate contact + asymmetric smear in +x direction
+    contactRadiusFactor = 0.7;
+    shearShiftX = area * 0.08;          // shift contact center 8% of area in +x
+    shearPressureBias = 0.40;           // 40% linear ramp across contact
+  }
+  // grasp: defaults (factor=1, no shear) — symmetric Hertzian
+
+  const R_effective = R * contactRadiusFactor;
 
   const flat = isFlatContact(contacts);
 
@@ -108,8 +158,9 @@ export function computePressureMap(simData, forceN, sensorType = 'gelsight') {
       const f = cp.normal_force * scale;
       if (f < 1e-6) continue;
 
-      const { contactRadius: a, peakPressure: p0 } = hertzianParams(f, R, E_star);
-      const cx = cp.position[0];
+      const { contactRadius: a, peakPressure: p0 } = hertzianParams(f, R_effective, E_star);
+      // Shift contact center in +x for slide scenario
+      const cx = cp.position[0] + shearShiftX;
       const cy = cp.position[1];
 
       for (let row = 0; row < res; row++) {
@@ -118,22 +169,36 @@ export function computePressureMap(simData, forceN, sensorType = 'gelsight') {
         for (let col = 0; col < res; col++) {
           const x = -halfArea + (col + 0.5) * taxelSize;
           const dx = x - cx;
-          const r = Math.sqrt(dx * dx + dy * dy);
+
+          // DIGIT slight asymmetry: stretch y-axis by asymmetryScale
+          const effDy = dy * (1.0 + sp.asymmetryScale);
+          const r = Math.sqrt(dx * dx + effDy * effDy);
+
           if (r <= a) {
             const ratio = r / a;
-            map[row * res + col] += p0 * Math.sqrt(1.0 - ratio * ratio);
+            let pressure = p0 * Math.sqrt(1.0 - ratio * ratio);
+
+            // Slide scenario: linear ramp — leading edge (+x) gets more pressure
+            if (shearPressureBias > 0 && a > 0) {
+              // dx/a ranges from -1..+1 within the contact circle
+              // bias maps that to (1 - bias) .. (1 + bias)
+              const ramp = 1.0 + shearPressureBias * (dx / a);
+              pressure *= ramp;
+            }
+
+            map[row * res + col] += Math.max(0, pressure);
           }
         }
       }
     }
   }
 
-  // Gaussian blur (simple 3x3 box blur applied twice ≈ sigma~0.8)
-  const blurred = boxBlur(map, res, 2);
+  // Gaussian blur — sensor-dependent number of passes
+  const blurred = boxBlur(map, res, sp.blurPasses);
 
   // Compute stats
   let maxP = 0, totalP = 0, contactCount = 0;
-  const noiseThresh = specs.noise_std * 3;
+  const noiseThresh = sp.noise_std * 3;
   for (let i = 0; i < blurred.length; i++) {
     if (blurred[i] > maxP) maxP = blurred[i];
     totalP += blurred[i];
