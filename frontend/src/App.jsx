@@ -37,8 +37,14 @@ export default function App() {
   const handleFileSelected = useCallback(async (file) => {
     setMeshFile(file);
     setError(null);
-    setLoading(true);
 
+    // In demo mode (no backend), just show the 3D preview with demo data
+    if (demoMode) {
+      setSimData(DEMO_SIM_DATA);
+      return;
+    }
+
+    setLoading(true);
     try {
       const formData = new FormData();
       formData.append('mesh_file', file);
@@ -58,21 +64,19 @@ export default function App() {
 
       const data = await res.json();
       setSimData(data);
-      // Set force to match simulation's actual force
       setForce(Math.round(data.total_sim_force * 10) / 10 || 2.0);
     } catch (err) {
       setError(err.message);
-      setSimData(null);
+      // Don't clear simData — keep demo/previous data usable
     } finally {
       setLoading(false);
     }
-  }, [sensorType, scenario]);
+  }, [sensorType, scenario, demoMode]);
 
   // Re-run simulation when sensor/scenario changes (if mesh exists)
   const handleSensorChange = useCallback((s) => {
     setSensorType(s);
-    if (meshFile) {
-      // Need to re-simulate with new sensor specs
+    if (meshFile && !demoMode) {
       const rerun = async () => {
         setLoading(true);
         try {
@@ -88,11 +92,11 @@ export default function App() {
       };
       rerun();
     }
-  }, [meshFile, scenario]);
+  }, [meshFile, scenario, demoMode]);
 
   const handleScenarioChange = useCallback((s) => {
     setScenario(s);
-    if (meshFile) {
+    if (meshFile && !demoMode) {
       const rerun = async () => {
         setLoading(true);
         try {
